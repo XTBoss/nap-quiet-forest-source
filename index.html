@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#152038" />
+    <title>午睡小森林</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+KuaiLe&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="sky" aria-hidden="true">
+      <div class="stars" id="stars"></div>
+      <div class="hills"></div>
+    </div>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand__mark" aria-hidden="true">🌲</span>
+        <div>
+          <h1>午睡小森林</h1>
+          <p>安静一会儿，就能种下一棵小树</p>
+        </div>
+      </div>
+      <div class="topbar__actions">
+        <button type="button" class="btn btn--ghost" id="settingsBtn">设置</button>
+        <button type="button" class="btn btn--ghost" id="stopBtn" hidden>结束</button>
+      </div>
+    </header>
+
+    <main class="stage">
+      <section class="meter" aria-live="polite">
+        <div class="moon-wrap" id="moonWrap">
+          <svg class="ring" viewBox="0 0 120 120" aria-hidden="true">
+            <circle class="ring__track" cx="60" cy="60" r="52" />
+            <circle class="ring__value" id="progressRing" cx="60" cy="60" r="52" />
+          </svg>
+          <div class="moon" id="moon">
+            <span class="moon__blush moon__blush--l"></span>
+            <span class="moon__blush moon__blush--r"></span>
+            <span class="moon__eye moon__eye--l"></span>
+            <span class="moon__eye moon__eye--r"></span>
+            <span class="moon__mouth"></span>
+          </div>
+        </div>
+        <div class="readout">
+          <p class="readout__db">
+            <span id="dbValue">--</span>
+            <small>分贝</small>
+          </p>
+          <p class="readout__status" id="statusText">还没有开始听教室的声音</p>
+          <p class="readout__hint" id="progressText">设定安静时长后，小朋友午睡就能种树</p>
+        </div>
+      </section>
+
+      <section class="stats" aria-label="小树和大树数量">
+        <div class="stat">
+          <strong id="smallCount">0</strong>
+          <span>棵小树</span>
+        </div>
+        <div class="stat">
+          <strong id="bigCount">0</strong>
+          <span>棵大树</span>
+        </div>
+        <div class="stat stat--wide">
+          <strong id="remainCount">3</strong>
+          <span id="remainLabel">再种 3 棵小树就能合成大树</span>
+        </div>
+      </section>
+
+      <section class="forest" aria-label="小森林">
+        <div class="trees" id="trees"></div>
+        <p class="forest__empty" id="emptyForest">还没有树。教室保持安静，小树就会冒出来。</p>
+        <div class="ground"></div>
+      </section>
+    </main>
+
+    <div class="overlay" id="startOverlay">
+      <div class="card">
+        <p class="card__kicker">幼儿园午睡</p>
+        <h2>让安静变成一片小森林</h2>
+        <p class="card__lead">
+          教室分贝低于设定值并保持一段时间，就会种下一棵小树。要是太吵也持续一段时间，小树会少一棵。小树凑够数量，会自动合成大树。
+        </p>
+        <div class="card__actions">
+          <button type="button" class="btn btn--primary" id="startMicBtn">开始监听教室</button>
+          <button type="button" class="btn btn--secondary" id="startDemoBtn">先演示一下</button>
+        </div>
+        <p class="card__note">
+          监听会使用麦克风，只在这台设备上即时计算分贝，不会保存历史记录。
+        </p>
+      </div>
+    </div>
+
+    <aside class="drawer" id="settingsDrawer" hidden>
+      <div class="drawer__panel" role="dialog" aria-labelledby="settingsTitle">
+        <div class="drawer__head">
+          <h2 id="settingsTitle">老师设置</h2>
+          <button type="button" class="btn btn--ghost" id="closeSettingsBtn">关闭</button>
+        </div>
+        <form class="settings" id="settingsForm">
+          <label class="field">
+            <span>安静阈值（分贝）</span>
+            <div class="field__row">
+              <input type="range" id="thresholdInput" min="18" max="80" step="1" value="42" />
+              <output id="thresholdOutput">42</output>
+            </div>
+            <small>数字长时间低于这个值，才会累积种树进度。可对照实时分贝来调。</small>
+          </label>
+          <button type="button" class="btn btn--secondary" id="calibrateBtn">
+            用现在的音量当作安静标准
+          </button>
+
+          <label class="field">
+            <span>种一棵小树需要安静多久</span>
+            <div class="field__row">
+              <input type="number" id="durationInput" min="0.1" max="180" step="0.1" value="20" />
+              <span class="unit">分钟</span>
+            </div>
+            <div class="presets">
+              <button type="button" class="chip" data-plant-minutes="20">20 分钟</button>
+              <button type="button" class="chip" data-plant-minutes="40">40 分钟</button>
+            </div>
+          </label>
+
+          <label class="field">
+            <span>太吵阈值（分贝）</span>
+            <div class="field__row">
+              <input type="range" id="loseThresholdInput" min="18" max="80" step="1" value="55" />
+              <output id="loseThresholdOutput">55</output>
+            </div>
+            <small>数字长时间高于这个值，就会少一棵小树。</small>
+          </label>
+
+          <label class="field">
+            <span>持续太吵多久会少一棵小树</span>
+            <div class="field__row">
+              <input type="number" id="loseDurationInput" min="0.1" max="180" step="0.1" value="10" />
+              <span class="unit">分钟</span>
+            </div>
+            <div class="presets">
+              <button type="button" class="chip" data-lose-minutes="10">10 分钟</button>
+              <button type="button" class="chip" data-lose-minutes="20">20 分钟</button>
+            </div>
+          </label>
+
+          <label class="field">
+            <span>几棵小树合成一棵大树</span>
+            <div class="field__row">
+              <input type="number" id="combineInput" min="2" max="12" step="1" value="3" />
+              <span class="unit">棵</span>
+            </div>
+          </label>
+
+          <p class="hint">短暂的一声响（大约 2 秒内）不会立刻清掉进度，避免门响、翻身把整段安静作废。</p>
+
+          <div class="drawer__foot">
+            <button type="button" class="btn btn--danger" id="resetForestBtn">清空这片小森林</button>
+          </div>
+        </form>
+      </div>
+    </aside>
+
+    <div class="toast" id="toast" hidden></div>
+    <button type="button" class="noise-btn" id="noiseBtn" hidden>教室开始吵</button>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

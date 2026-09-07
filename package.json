@@ -1,0 +1,16 @@
+{
+  "name": "nap-quiet-forest",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "pack": "vite build && node scripts/pack.js",
+    "preview": "vite preview",
+    "test": "node --test src/forest.test.js"
+  },
+  "devDependencies": {
+    "vite": "^8.2.2"
+  }
+}
