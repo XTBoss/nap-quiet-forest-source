@@ -164,6 +164,33 @@ function Write-HistoryJson($res, $records, [int]$status = 200) {
   $res.OutputStream.Write($bytes, 0, $bytes.Length)
 }
 
+function Open-LocalUrl([string]$target) {
+  try {
+    Start-Process $target | Out-Null
+    return $true
+  } catch {}
+  try {
+    Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "start", "", $target) -WindowStyle Hidden | Out-Null
+    return $true
+  } catch {}
+  $browsers = @(
+    "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+    "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+    "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+    "$env:LocalAppData\Google\Chrome\Application\chrome.exe",
+    "$env:ProgramFiles\Mozilla Firefox\firefox.exe"
+  )
+  foreach ($exe in $browsers) {
+    if (Test-Path -LiteralPath $exe) {
+      try {
+        Start-Process -FilePath $exe -ArgumentList $target | Out-Null
+        return $true
+      } catch {}
+    }
+  }
+  return $false
+}
+
 $started = $false
 $listener = $null
 $port = 0
@@ -196,11 +223,15 @@ Write-Host ""
 Write-Host "正在打开浏览器：$url"
 Write-Host ""
 Write-Host "请不要关闭这个窗口。"
-Write-Host "用完后，直接关掉本窗口即可。"
+Write-Host "用完后，先在页面点「结束」，再关掉本窗口。"
 Write-Host "记录会写入旁边的 data 文件夹。"
 Write-Host ""
 
-Start-Process $url
+if (-not (Open-LocalUrl $url)) {
+  Write-Host "没有自动打开浏览器。请自己打开浏览器，在地址栏输入："
+  Write-Host "  $url"
+  Write-Host ""
+}
 
 $rootPrefix = $root.TrimEnd("\", "/") + "\"
 
