@@ -12,7 +12,9 @@ dist
 dist-ssr
 *.local
 *.zip
+/data/
 /午睡小森林/
+/安静小森林/
 
 # Editor directories and files
 .vscode/*

@@ -18,6 +18,9 @@ export function copyLaunchers(distRelative = "dist") {
   chmodSync(commandPath, 0o755);
 
   copyFileSync(join(srcDir, "start.bat"), join(distDir, "启动.bat"));
+  copyFileSync(join(srcDir, "server.py"), join(distDir, "server.py"));
+  mkdirSync(join(distDir, "data"), { recursive: true });
+  writeFileSync(join(distDir, "data", ".keep"), "");
   writeUtf8Bom(join(distDir, "launch.ps1"), readFileSync(join(srcDir, "launch.ps1"), "utf8"));
   writeUtf8Bom(
     join(distDir, "使用说明.txt"),

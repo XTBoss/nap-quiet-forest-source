@@ -4,8 +4,8 @@ import time
 import zipfile
 
 root = Path(__file__).resolve().parent.parent
-folder = root / "午睡小森林"
-zip_path = root / "午睡小森林.zip"
+folder = root / "安静小森林"
+zip_path = root / "安静小森林.zip"
 
 if not folder.is_dir():
     raise SystemExit("未找到要打包的文件夹")

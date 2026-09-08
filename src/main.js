@@ -7,6 +7,17 @@ import {
   pickSmallTreeToRemove,
   remainingToCombine,
 } from "./forest.js";
+import {
+  HISTORY_KEY,
+  LEGACY_HISTORY_KEY,
+  appendHistory,
+  extractImportedRecords,
+  formatEndedAt,
+  formatHistorySummary,
+  mergeHistory,
+  parseHistory,
+  shouldSaveSession,
+} from "./history.js";
 
 const RING_LENGTH = 2 * Math.PI * 52;
 const GRACE_MS = 2000;
@@ -47,6 +58,12 @@ const els = {
   combineInput: document.getElementById("combineInput"),
   calibrateBtn: document.getElementById("calibrateBtn"),
   resetForestBtn: document.getElementById("resetForestBtn"),
+  historyList: document.getElementById("historyList"),
+  historyEmpty: document.getElementById("historyEmpty"),
+  clearHistoryBtn: document.getElementById("clearHistoryBtn"),
+  exportHistoryBtn: document.getElementById("exportHistoryBtn"),
+  importHistoryBtn: document.getElementById("importHistoryBtn"),
+  importHistoryFile: document.getElementById("importHistoryFile"),
 };
 
 const state = {
@@ -64,7 +81,110 @@ const state = {
   loopId: 0,
   audio: null,
   demoLoud: false,
+  sessionQuietMs: 0,
+  sessionPlanted: 0,
+  sessionLost: 0,
+  fileStore: false,
 };
+
+function readLocalHistory() {
+  const current = localStorage.getItem(HISTORY_KEY);
+  if (current) return parseHistory(current);
+  return parseHistory(localStorage.getItem(LEGACY_HISTORY_KEY));
+}
+
+function writeLocalHistory(records) {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(records));
+}
+
+async function historyRequest(method, body) {
+  const res = await fetch("/api/history", {
+    method,
+    headers: body === undefined ? { Accept: "application/json" } : { Accept: "application/json", "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const type = res.headers.get("content-type") || "";
+  if (!res.ok || !type.includes("json")) throw new Error("history api unavailable");
+  return extractImportedRecords(await res.json());
+}
+
+async function refreshHistory() {
+  try {
+    const records = await historyRequest("GET");
+    state.fileStore = true;
+    writeLocalHistory(records);
+    return records;
+  } catch {
+    state.fileStore = false;
+    return readLocalHistory();
+  }
+}
+
+function renderHistory(records = readLocalHistory()) {
+  els.historyEmpty.hidden = records.length > 0;
+  els.clearHistoryBtn.hidden = records.length === 0;
+  els.exportHistoryBtn.hidden = records.length === 0;
+  els.historyList.replaceChildren(
+    ...records.map((record) => {
+      const item = document.createElement("li");
+      item.className = "history__item";
+
+      const when = document.createElement("div");
+      when.className = "history__when";
+      const time = document.createElement("time");
+      time.dateTime = record.endedAt;
+      time.textContent = formatEndedAt(record.endedAt);
+      when.append(time);
+      if (record.demo) {
+        const tag = document.createElement("span");
+        tag.className = "history__tag";
+        tag.textContent = "演示";
+        when.append(tag);
+      }
+
+      const summary = document.createElement("p");
+      summary.textContent = formatHistorySummary(record);
+
+      item.append(when, summary);
+      return item;
+    }),
+  );
+}
+
+async function recordSession() {
+  const entry = {
+    endedAt: new Date().toISOString(),
+    quietMs: Math.round(state.sessionQuietMs),
+    planted: state.sessionPlanted,
+    lost: state.sessionLost,
+    big: counts().big,
+    demo: state.demo,
+  };
+  if (!shouldSaveSession(entry)) return;
+
+  let records = appendHistory(readLocalHistory(), entry);
+  writeLocalHistory(records);
+  renderHistory(records);
+
+  if (state.fileStore) {
+    try {
+      records = await historyRequest("POST", entry);
+      writeLocalHistory(records);
+      renderHistory(records);
+      showToast("这一场已保存到 data 文件夹");
+      return;
+    } catch {
+      showToast("已记在浏览器里，但没能写入文件");
+      return;
+    }
+  }
+}
+
+function resetSessionStats() {
+  state.sessionQuietMs = 0;
+  state.sessionPlanted = 0;
+  state.sessionLost = 0;
+}
 
 function loadSettings() {
   try {
@@ -234,6 +354,7 @@ function plantSmallTree() {
     anim: "tree--sprout",
   });
   state.nextId += 1;
+  state.sessionPlanted += 1;
   renderForest();
   saveForest();
   showToast("种下一棵小树了");
@@ -251,6 +372,7 @@ function loseSmallTree() {
   window.setTimeout(() => {
     state.trees = state.trees.filter((tree) => tree.id !== victim.id);
     state.losing = false;
+    state.sessionLost += 1;
     renderForest();
     saveForest();
     showToast("太吵了，少了一棵小树");
@@ -343,6 +465,7 @@ function startDemo() {
 }
 
 function stopListening() {
+  const save = state.running ? recordSession() : Promise.resolve();
   state.running = false;
   state.loopId += 1;
   state.demo = false;
@@ -356,7 +479,8 @@ function stopListening() {
   document.body.classList.remove("is-loud");
   els.dbValue.textContent = "--";
   els.statusText.textContent = "还没有开始听教室的声音";
-  els.progressText.textContent = "设定安静时长后，小朋友午睡就能种树";
+  els.progressText.textContent = "设定安静时长后，保持安静就能种树";
+  void save;
 }
 
 function begin(demo) {
@@ -365,6 +489,7 @@ function begin(demo) {
   state.running = true;
   state.demo = demo;
   state.lastTs = performance.now();
+  resetSessionStats();
   els.overlay.hidden = true;
   els.stopBtn.hidden = false;
   els.noiseBtn.hidden = !demo;
@@ -386,6 +511,7 @@ function tick(now, loopId) {
   if (quiet) {
     state.loudMs = 0;
     state.quietMs += dt;
+    state.sessionQuietMs += dt;
   } else {
     state.loudMs += dt;
     if (state.loudMs >= GRACE_MS) {
@@ -450,9 +576,12 @@ els.startDemoBtn.addEventListener("click", () => {
   showToast("演示中：默认是安静教室，点右下角可以让教室吵起来");
 });
 
-els.stopBtn.addEventListener("click", stopListening);
+els.stopBtn.addEventListener("click", () => {
+  void stopListening();
+});
 els.settingsBtn.addEventListener("click", () => {
   els.drawer.hidden = false;
+  void refreshHistory().then(renderHistory);
 });
 els.closeSettingsBtn.addEventListener("click", () => {
   els.drawer.hidden = true;
@@ -511,6 +640,72 @@ els.resetForestBtn.addEventListener("click", () => {
   showToast("小森林已清空");
 });
 
+els.clearHistoryBtn.addEventListener("click", () => {
+  if (!window.confirm("清空全部往日记录？文件里的 data 记录也会删掉。")) return;
+  void (async () => {
+    writeLocalHistory([]);
+    if (state.fileStore) {
+      try {
+        await historyRequest("DELETE");
+      } catch {
+        showToast("浏览器记录已清空，但文件没能删掉");
+        renderHistory([]);
+        return;
+      }
+    }
+    renderHistory([]);
+    showToast("往日小森林已清空");
+  })();
+});
+
+els.exportHistoryBtn.addEventListener("click", () => {
+  const records = readLocalHistory();
+  if (!records.length) return;
+  const blob = new Blob([JSON.stringify({ records }, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "安静小森林-记录.json";
+  link.click();
+  URL.revokeObjectURL(url);
+});
+
+els.importHistoryBtn.addEventListener("click", () => {
+  els.importHistoryFile.click();
+});
+
+els.importHistoryFile.addEventListener("change", () => {
+  const file = els.importHistoryFile.files?.[0];
+  els.importHistoryFile.value = "";
+  if (!file) return;
+  void file.text().then(async (text) => {
+    const incoming = extractImportedRecords(JSON.parse(text));
+    if (!incoming.length) {
+      showToast("这个文件里没有可导入的记录");
+      return;
+    }
+    const merged = mergeHistory(readLocalHistory(), incoming);
+    writeLocalHistory(merged);
+    if (state.fileStore) {
+      try {
+        const records = await historyRequest("PUT", { records: merged });
+        writeLocalHistory(records);
+        renderHistory(records);
+        showToast(`已导入，现在共 ${records.length} 条`);
+        return;
+      } catch {
+        renderHistory(merged);
+        showToast("已导入到浏览器，但没能写入文件");
+        return;
+      }
+    }
+    renderHistory(merged);
+    showToast(`已导入，现在共 ${merged.length} 条`);
+  }).catch(() => {
+    showToast("无法读取这个文件");
+  });
+});
+
 els.noiseBtn.addEventListener("click", () => {
   state.demoLoud = !state.demoLoud;
   els.noiseBtn.textContent = state.demoLoud ? "教室安静下来" : "教室开始吵";
@@ -520,5 +715,7 @@ loadSettings();
 loadForest();
 paintStars();
 renderForest();
+renderHistory();
+void refreshHistory().then(renderHistory);
 els.progressRing.style.strokeDasharray = String(RING_LENGTH);
 els.progressRing.style.strokeDashoffset = String(RING_LENGTH);
