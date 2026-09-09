@@ -12,55 +12,93 @@ Set-Location -LiteralPath $root
 $dataDir = Join-Path $root "data"
 $maxHistory = 365
 
-function Get-JsonSerializer {
-  if (-not ("System.Web.Script.Serialization.JavaScriptSerializer" -as [type])) {
-    Add-Type -AssemblyName System.Web.Extensions
-  }
-  $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
-  $serializer.MaxJsonLength = 16777216
-  $serializer.RecursionLimit = 100
-  return $serializer
-}
+$script:QuietJsonError = $null
+if (-not ("QuietForestJson" -as [type])) {
+  try {
+    Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+    Add-Type -ReferencedAssemblies @("System.Web.Extensions", "System.Management.Automation", "System") -TypeDefinition @"
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Management.Automation;
+using System.Web.Script.Serialization;
 
-function ConvertTo-Plain($obj) {
-  if ($null -eq $obj) { return $null }
-  if ($obj -is [string] -or $obj -is [bool] -or $obj -is [char]) { return $obj }
-  if ($obj -is [byte] -or $obj -is [int16] -or $obj -is [uint16] -or $obj -is [int] -or $obj -is [uint32] -or $obj -is [long] -or $obj -is [uint64] -or $obj -is [decimal] -or $obj -is [double] -or $obj -is [single]) { return $obj }
-  if ($obj -is [datetime]) { return $obj.ToString("o") }
-  if ($obj -is [System.Collections.IDictionary]) {
-    $dict = New-Object "System.Collections.Generic.Dictionary[string,object]"
-    foreach ($key in $obj.Keys) { $dict[[string]$key] = ConvertTo-Plain $obj[$key] }
-    return $dict
+public static class QuietForestJson {
+  static readonly JavaScriptSerializer Serializer = CreateSerializer();
+
+  static JavaScriptSerializer CreateSerializer() {
+    var serializer = new JavaScriptSerializer();
+    serializer.MaxJsonLength = 16777216;
+    serializer.RecursionLimit = 100;
+    return serializer;
   }
-  if ($obj -is [System.Collections.IEnumerable]) {
-    $list = New-Object "System.Collections.Generic.List[object]"
-    foreach ($item in $obj) { $list.Add((ConvertTo-Plain $item)) }
-    return $list
+
+  public static string Serialize(object obj) {
+    return Serializer.Serialize(ToPlain(obj));
   }
-  $dict = New-Object "System.Collections.Generic.Dictionary[string,object]"
-  foreach ($prop in $obj.PSObject.Properties) {
-    if ($prop.MemberType -eq "NoteProperty" -or $prop.MemberType -eq "Property") {
-      $dict[$prop.Name] = ConvertTo-Plain $prop.Value
+
+  public static object Deserialize(string text) {
+    return Serializer.DeserializeObject(text);
+  }
+
+  static object ToPlain(object obj) {
+    if (obj == null || obj is DBNull) return null;
+    obj = Unwrap(obj);
+    if (obj == null) return null;
+    if (obj is string || obj is bool || obj is char) return obj;
+    if (obj is DateTime) return ((DateTime)obj).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+    if (obj is byte || obj is sbyte || obj is short || obj is ushort || obj is int || obj is uint || obj is long || obj is ulong || obj is decimal || obj is float || obj is double) return obj;
+    var dict = obj as IDictionary;
+    if (dict != null) {
+      var map = new Dictionary<string, object>();
+      foreach (DictionaryEntry entry in dict) map[Convert.ToString(entry.Key)] = ToPlain(entry.Value);
+      return map;
     }
+    var enumerable = obj as IEnumerable;
+    if (enumerable != null) {
+      var list = new List<object>();
+      foreach (var item in enumerable) list.Add(ToPlain(item));
+      return list;
+    }
+    var psobj = obj as PSObject;
+    if (psobj != null) {
+      var map = new Dictionary<string, object>();
+      foreach (var prop in psobj.Properties) {
+        if (prop.MemberType == PSMemberTypes.NoteProperty || prop.MemberType == PSMemberTypes.Property) {
+          map[prop.Name] = ToPlain(prop.Value);
+        }
+      }
+      return map;
+    }
+    return obj.ToString();
   }
-  return $dict
+
+  static object Unwrap(object obj) {
+    var ps = obj as PSObject;
+    if (ps == null) return obj;
+    if (ps.BaseObject == null || ps.BaseObject is PSCustomObject) return ps;
+    return ps.BaseObject;
+  }
+}
+"@
+  } catch {
+    $script:QuietJsonError = $_
+  }
 }
 
 function ConvertTo-JsonSafe($obj) {
-  try {
-    return (Get-JsonSerializer).Serialize((ConvertTo-Plain $obj))
-  } catch {
-    return ConvertTo-Json -InputObject $obj -Depth 32 -Compress
+  if ("QuietForestJson" -as [type]) {
+    return [QuietForestJson]::Serialize($obj)
   }
+  return ConvertTo-Json -InputObject $obj -Depth 32 -Compress
 }
 
 function ConvertFrom-JsonSafe([string]$text) {
   if ([string]::IsNullOrWhiteSpace($text)) { return $null }
-  try {
-    return (Get-JsonSerializer).DeserializeObject($text)
-  } catch {
-    return $text | ConvertFrom-Json
+  if ("QuietForestJson" -as [type]) {
+    return [QuietForestJson]::Deserialize($text)
   }
+  return $text | ConvertFrom-Json
 }
 
 function Get-JsonArray($value) {
@@ -419,6 +457,9 @@ if ($args -contains "-SelfTest") {
   $root = $temp
   $dataDir = Join-Path $root "data"
   try {
+    if ($PSVersionTable.PSVersion.Major -lt 6 -and -not ("QuietForestJson" -as [type])) {
+      throw "QuietForestJson failed to load: $script:QuietJsonError"
+    }
     $data = @{
       version = 1
       revision = 0
