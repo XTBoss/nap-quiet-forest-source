@@ -105,3 +105,5 @@ npm run pack
 ```
 
 命令会生成 `安静小森林.zip`，其中包含网页资源、Mac 和 Windows 启动器，以及空的 `data` 文件夹。收件人解压后即可双击启动，无需安装 Node.js。
+
+推送到 `main`、提交 Pull Request、打 `v*` 标签，或在 GitHub Actions 里手动运行「打包」工作流，都会自动执行测试并生成同样的压缩包。
