@@ -35,13 +35,15 @@ jobs:
         run: npm test
 
       - name: 打包
-        run: npm run pack
+        run: |
+          npm run pack
+          cp "安静小森林.zip" quiet-forest.zip
 
       - name: 上传压缩包
         uses: actions/upload-artifact@v6
         with:
           name: quiet-forest
-          path: 安静小森林.zip
+          path: quiet-forest.zip
           if-no-files-found: error
 
       - name: 发布版本 Release
@@ -49,7 +51,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" "安静小森林.zip" \
+          gh release create "${GITHUB_REF_NAME}" quiet-forest.zip \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes
 
@@ -62,12 +64,13 @@ jobs:
 
           提交：${GITHUB_SHA}
 
-          解压后不要直接在压缩包里打开文件。Mac 双击「启动.command」，Windows 双击「启动.bat」。"
+          下载 quiet-forest.zip 后解压，得到「安静小森林」文件夹。不要直接在压缩包里打开文件。Mac 双击「启动.command」，Windows 双击「启动.bat」。"
           if gh release view latest >/dev/null 2>&1; then
-            gh release upload latest "安静小森林.zip" --clobber
+            gh release delete-asset latest default.zip --yes 2>/dev/null || true
+            gh release upload latest quiet-forest.zip --clobber
             gh release edit latest --notes "${notes}"
           else
-            gh release create latest "安静小森林.zip" \
+            gh release create latest quiet-forest.zip \
               --title "最新打包" \
               --notes "${notes}" \
               --prerelease
