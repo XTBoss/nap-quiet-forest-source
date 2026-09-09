@@ -1,0 +1,27 @@
+name: Windows 启动器
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - launchers/**
+      - scripts/classroom-store.test.js
+      - .github/workflows/windows-launcher.yml
+  pull_request:
+    paths:
+      - launchers/**
+      - scripts/classroom-store.test.js
+      - .github/workflows/windows-launcher.yml
+  workflow_dispatch:
+
+jobs:
+  selftest:
+    name: PowerShell 自检
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 运行启动器自检
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File launchers\launch.ps1 -SelfTest
