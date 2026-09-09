@@ -12,6 +12,87 @@ Set-Location -LiteralPath $root
 $dataDir = Join-Path $root "data"
 $maxHistory = 365
 
+function Get-JsonSerializer {
+  if (-not ("System.Web.Script.Serialization.JavaScriptSerializer" -as [type])) {
+    Add-Type -AssemblyName System.Web.Extensions
+  }
+  $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+  $serializer.MaxJsonLength = 16777216
+  $serializer.RecursionLimit = 100
+  return $serializer
+}
+
+function ConvertTo-Plain($obj) {
+  if ($null -eq $obj) { return $null }
+  if ($obj -is [string] -or $obj -is [bool] -or $obj -is [char]) { return $obj }
+  if ($obj -is [byte] -or $obj -is [int16] -or $obj -is [uint16] -or $obj -is [int] -or $obj -is [uint32] -or $obj -is [long] -or $obj -is [uint64] -or $obj -is [decimal] -or $obj -is [double] -or $obj -is [single]) { return $obj }
+  if ($obj -is [datetime]) { return $obj.ToString("o") }
+  if ($obj -is [System.Collections.IDictionary]) {
+    $dict = New-Object "System.Collections.Generic.Dictionary[string,object]"
+    foreach ($key in $obj.Keys) { $dict[[string]$key] = ConvertTo-Plain $obj[$key] }
+    return $dict
+  }
+  if ($obj -is [System.Collections.IEnumerable]) {
+    $list = New-Object "System.Collections.Generic.List[object]"
+    foreach ($item in $obj) { $list.Add((ConvertTo-Plain $item)) }
+    return $list
+  }
+  $dict = New-Object "System.Collections.Generic.Dictionary[string,object]"
+  foreach ($prop in $obj.PSObject.Properties) {
+    if ($prop.MemberType -eq "NoteProperty" -or $prop.MemberType -eq "Property") {
+      $dict[$prop.Name] = ConvertTo-Plain $prop.Value
+    }
+  }
+  return $dict
+}
+
+function ConvertTo-JsonSafe($obj) {
+  try {
+    return (Get-JsonSerializer).Serialize((ConvertTo-Plain $obj))
+  } catch {
+    return ConvertTo-Json -InputObject $obj -Depth 32 -Compress
+  }
+}
+
+function ConvertFrom-JsonSafe([string]$text) {
+  if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+  try {
+    return (Get-JsonSerializer).DeserializeObject($text)
+  } catch {
+    return $text | ConvertFrom-Json
+  }
+}
+
+function Get-JsonArray($value) {
+  $list = New-Object "System.Collections.Generic.List[object]"
+  if ($null -eq $value) { return ,$list }
+  if ($value -is [string]) {
+    $list.Add([string]$value)
+    return ,$list
+  }
+  if ($value -is [System.Collections.IDictionary]) {
+    $list.Add($value)
+    return ,$list
+  }
+  if ($value -is [System.Collections.IEnumerable]) {
+    foreach ($item in $value) { $list.Add($item) }
+    return ,$list
+  }
+  $list.Add($value)
+  return ,$list
+}
+
+function Get-JsonValue($obj, [string]$name) {
+  if ($null -eq $obj) { return $null }
+  if ($obj -is [System.Collections.IDictionary]) { return $obj[$name] }
+  return $obj.$name
+}
+
+function Set-JsonValue($obj, [string]$name, $value) {
+  if ($obj -is [System.Collections.IDictionary]) { $obj[$name] = $value }
+  else { $obj.$name = $value }
+}
+
 function Get-Mime([string]$ext) {
   switch ($ext.ToLowerInvariant()) {
     ".html" { "text/html; charset=utf-8" }
@@ -35,13 +116,15 @@ function Get-Mime([string]$ext) {
 }
 
 function Test-HistoryRecord($item) {
-  if ($null -eq $item) { return $false }
-  if (-not $item.endedAt) { return $false }
+  if ($null -eq $item -or $item -is [string]) { return $false }
+  if ($item -is [System.Collections.IEnumerable] -and $item -isnot [System.Collections.IDictionary]) { return $false }
+  $endedAt = Get-JsonValue $item "endedAt"
+  if (-not $endedAt) { return $false }
   try {
-    [void][double]$item.quietMs
-    [void][double]$item.planted
-    [void][double]$item.lost
-    [void][double]$item.big
+    [void][double](Get-JsonValue $item "quietMs")
+    [void][double](Get-JsonValue $item "planted")
+    [void][double](Get-JsonValue $item "lost")
+    [void][double](Get-JsonValue $item "big")
     return $true
   } catch {
     return $false
@@ -49,13 +132,19 @@ function Test-HistoryRecord($item) {
 }
 
 function ConvertTo-HistoryRecord($item) {
+  $endedAt = Get-JsonValue $item "endedAt"
+  if ($endedAt -is [datetime]) {
+    $endedAt = ([datetime]$endedAt).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+  } else {
+    $endedAt = [string]$endedAt
+  }
   return @{
-    endedAt = [string]$item.endedAt
-    quietMs = [int][math]::Round([double]$item.quietMs)
-    planted = [int][math]::Round([double]$item.planted)
-    lost = [int][math]::Round([double]$item.lost)
-    big = [int][math]::Round([double]$item.big)
-    demo = [bool]$item.demo
+    endedAt = $endedAt
+    quietMs = [int][math]::Round([double](Get-JsonValue $item "quietMs"))
+    planted = [int][math]::Round([double](Get-JsonValue $item "planted"))
+    lost = [int][math]::Round([double](Get-JsonValue $item "lost"))
+    big = [int][math]::Round([double](Get-JsonValue $item "big"))
+    demo = [bool](Get-JsonValue $item "demo")
   }
 }
 
@@ -67,51 +156,63 @@ function Get-RecordKey($item) {
 }
 
 function Get-ImportedRecords($payload) {
-  $items = @()
-  if ($null -eq $payload) { return @() }
-  if (Test-HistoryRecord $payload) { return @(ConvertTo-HistoryRecord $payload) }
-  if ($payload -is [System.Collections.IEnumerable] -and $payload -isnot [string]) {
+  $items = New-Object "System.Collections.Generic.List[object]"
+  if ($null -eq $payload) { return ,$items }
+  if (Test-HistoryRecord $payload) {
+    $items.Add((ConvertTo-HistoryRecord $payload))
+    return ,$items
+  }
+  if ($payload -is [System.Collections.IEnumerable] -and $payload -isnot [string] -and $payload -isnot [System.Collections.IDictionary]) {
     foreach ($item in $payload) {
-      if (Test-HistoryRecord $item) { $items += ConvertTo-HistoryRecord $item }
+      if (Test-HistoryRecord $item) { $items.Add((ConvertTo-HistoryRecord $item)) }
     }
-    if ($items.Count -gt 0) { return $items }
+    if ($items.Count -gt 0) { return ,$items }
   }
-  if ($payload.records) {
-    foreach ($item in @($payload.records)) {
-      if (Test-HistoryRecord $item) { $items += ConvertTo-HistoryRecord $item }
-    }
-  } elseif ($payload.sessions) {
-    foreach ($item in @($payload.sessions)) {
-      if (Test-HistoryRecord $item) { $items += ConvertTo-HistoryRecord $item }
+  foreach ($item in (Get-JsonArray (Get-JsonValue $payload "records"))) {
+    if (Test-HistoryRecord $item) { $items.Add((ConvertTo-HistoryRecord $item)) }
+  }
+  if ($items.Count -eq 0) {
+    foreach ($item in (Get-JsonArray (Get-JsonValue $payload "sessions"))) {
+      if (Test-HistoryRecord $item) { $items.Add((ConvertTo-HistoryRecord $item)) }
     }
   }
-  return $items
+  return ,$items
 }
 
 function Merge-History($existing, $incoming) {
   $map = [ordered]@{}
-  foreach ($item in @($existing) + @($incoming)) {
+  foreach ($item in (Get-JsonArray $existing)) {
     if (-not (Test-HistoryRecord $item)) { continue }
     $record = ConvertTo-HistoryRecord $item
     $key = Get-RecordKey $record
     if (-not $map.Contains($key)) { $map[$key] = $record }
   }
-  return @($map.Values | Sort-Object { $_.endedAt } -Descending | Select-Object -First $maxHistory)
+  foreach ($item in (Get-JsonArray $incoming)) {
+    if (-not (Test-HistoryRecord $item)) { continue }
+    $record = ConvertTo-HistoryRecord $item
+    $key = Get-RecordKey $record
+    if (-not $map.Contains($key)) { $map[$key] = $record }
+  }
+  $sorted = New-Object "System.Collections.Generic.List[object]"
+  foreach ($item in ($map.Values | Sort-Object { $_.endedAt } -Descending | Select-Object -First $maxHistory)) {
+    $sorted.Add($item)
+  }
+  return ,$sorted
 }
 
 function Get-HistoryRecords {
   if (-not (Test-Path -LiteralPath $dataDir)) {
     New-Item -ItemType Directory -Path $dataDir | Out-Null
   }
-  $records = @()
+  $records = New-Object "System.Collections.Generic.List[object]"
   Get-ChildItem -LiteralPath $dataDir -File -ErrorAction SilentlyContinue | ForEach-Object {
     if ($_.Name -notmatch '^\d{4}-\d{2}-\d{2}\.json$') { return }
     try {
-      $payload = Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
-      $records += Get-ImportedRecords $payload
+      $payload = ConvertFrom-JsonSafe (Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8)
+      foreach ($item in (Get-ImportedRecords $payload)) { $records.Add($item) }
     } catch {}
   }
-  return Merge-History $records @()
+  return ,(Merge-History $records.ToArray() @())
 }
 
 function Save-HistoryRecords($records) {
@@ -127,15 +228,15 @@ function Save-HistoryRecords($records) {
   foreach ($item in (Merge-History $records @())) {
     $ended = [datetime]$item.endedAt
     $key = $ended.ToString("yyyy-MM-dd")
-    if (-not $grouped.ContainsKey($key)) { $grouped[$key] = @() }
-    $grouped[$key] += $item
+    if (-not $grouped.ContainsKey($key)) { $grouped[$key] = New-Object "System.Collections.Generic.List[object]" }
+    $grouped[$key].Add($item)
   }
   foreach ($date in $grouped.Keys) {
-    $payload = @{ date = $date; sessions = @($grouped[$date]) }
-    $json = $payload | ConvertTo-Json -Depth 6
+    $payload = @{ date = $date; sessions = $grouped[$date] }
+    $json = ConvertTo-JsonSafe $payload
     [IO.File]::WriteAllText((Join-Path $dataDir "$date.json"), $json, [Text.UTF8Encoding]::new($false))
   }
-  return Get-HistoryRecords
+  return ,(Get-HistoryRecords)
 }
 
 function Test-ClassroomInteger($value, [long]$maximum) {
@@ -144,50 +245,70 @@ function Test-ClassroomInteger($value, [long]$maximum) {
 }
 
 function Assert-Classroom($value) {
-  if ($null -eq $value -or $value.version -ne 1 -or -not (Test-ClassroomInteger $value.revision 1000000)) { throw "Invalid classroom version" }
-  if ($value.className -isnot [string] -or [string]::IsNullOrWhiteSpace($value.className) -or $value.className.Length -gt 32) { throw "Invalid class name" }
-  if (-not (Test-ClassroomInteger $value.smilesPerSticker 100) -or $value.smilesPerSticker -lt 1) { throw "Invalid ratio" }
-  if ($value.students -isnot [array] -or $value.students.Count -gt 120 -or $value.events -isnot [array] -or $value.events.Count -gt 50000) { throw "Invalid classroom lists" }
+  if ($null -eq $value -or (Get-JsonValue $value "version") -ne 1 -or -not (Test-ClassroomInteger (Get-JsonValue $value "revision") 1000000)) { throw "Invalid classroom version" }
+  $className = Get-JsonValue $value "className"
+  if ($className -isnot [string] -or [string]::IsNullOrWhiteSpace($className) -or $className.Length -gt 32) { throw "Invalid class name" }
+  $classRatio = Get-JsonValue $value "smilesPerSticker"
+  if (-not (Test-ClassroomInteger $classRatio 100) -or $classRatio -lt 1) { throw "Invalid ratio" }
+  $classStudents = Get-JsonArray (Get-JsonValue $value "students")
+  $classEvents = Get-JsonArray (Get-JsonValue $value "events")
+  if ($classStudents.Count -gt 120 -or $classEvents.Count -gt 50000) { throw "Invalid classroom lists" }
   $classBalances = @{}
-  foreach ($classStudent in $value.students) {
-    if ($classStudent.id -isnot [string] -or -not $classStudent.id -or $classStudent.id.Length -gt 80 -or $classBalances.ContainsKey($classStudent.id)) { throw "Invalid student id" }
-    if ($classStudent.name -isnot [string] -or [string]::IsNullOrWhiteSpace($classStudent.name) -or $classStudent.name.Length -gt 24 -or $classStudent.archived -isnot [bool]) { throw "Invalid student" }
-    if ($classStudent.avatar -isnot [string] -or ($classStudent.avatar -notmatch '^preset:([0-9]|[1-5][0-9])$' -and ($classStudent.avatar.Length -gt 24000 -or $classStudent.avatar -notmatch '^data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$'))) { throw "Invalid avatar" }
-    $classBalances[$classStudent.id] = @{ positive = 0; negative = 0; spent = 0; clearedSmiles = 0; clearedFrowns = 0; stickers = 0 }
+  foreach ($classStudent in $classStudents) {
+    $classStudentId = Get-JsonValue $classStudent "id"
+    $classStudentName = Get-JsonValue $classStudent "name"
+    $classStudentAvatar = Get-JsonValue $classStudent "avatar"
+    $classStudentArchived = Get-JsonValue $classStudent "archived"
+    if ($classStudentId -isnot [string] -or -not $classStudentId -or $classStudentId.Length -gt 80 -or $classBalances.ContainsKey($classStudentId)) { throw "Invalid student id" }
+    if ($classStudentName -isnot [string] -or [string]::IsNullOrWhiteSpace($classStudentName) -or $classStudentName.Length -gt 24 -or $classStudentArchived -isnot [bool]) { throw "Invalid student" }
+    if ($classStudentAvatar -isnot [string] -or ($classStudentAvatar -notmatch '^preset:([0-9]|[1-5][0-9])$' -and ($classStudentAvatar.Length -gt 24000 -or $classStudentAvatar -notmatch '^data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$'))) { throw "Invalid avatar" }
+    $classBalances[$classStudentId] = @{ positive = 0; negative = 0; spent = 0; clearedSmiles = 0; clearedFrowns = 0; stickers = 0 }
   }
   $classFields = @{ award = "positive"; deduct = "negative"; redeem = "spent"; "clear-smile" = "clearedSmiles"; "clear-frown" = "clearedFrowns" }
-  $classStack = New-Object 'System.Collections.Generic.List[object]'
+  $classStack = New-Object "System.Collections.Generic.List[object]"
   $classEventIds = @{}
-  foreach ($classEvent in $value.events) {
-    if ($classEvent.id -isnot [string] -or -not $classEvent.id -or $classEventIds.ContainsKey($classEvent.id)) { throw "Invalid event id" }
-    $classEventIds[$classEvent.id] = $true
-    if ($classEvent.reason -isnot [string] -or $classEvent.reason.Length -gt 120) { throw "Invalid reason" }
-    [void][datetime]::Parse($classEvent.at)
-    if ($classEvent.studentIds -isnot [array] -or $classEvent.studentIds.Count -eq 0) { throw "Invalid event students" }
+  foreach ($classEvent in $classEvents) {
+    $classEventId = Get-JsonValue $classEvent "id"
+    $classEventReason = Get-JsonValue $classEvent "reason"
+    $classEventType = [string](Get-JsonValue $classEvent "type")
+    $classEventStudentIds = Get-JsonArray (Get-JsonValue $classEvent "studentIds")
+    if ($classEventId -isnot [string] -or -not $classEventId -or $classEventIds.ContainsKey($classEventId)) { throw "Invalid event id" }
+    $classEventIds[$classEventId] = $true
+    if ($classEventReason -isnot [string] -or $classEventReason.Length -gt 120) { throw "Invalid reason" }
+    [void][datetime]::Parse((Get-JsonValue $classEvent "at"))
+    if ($classEventStudentIds.Count -eq 0) { throw "Invalid event students" }
     $classUnique = @{}
-    foreach ($classStudentId in $classEvent.studentIds) {
+    foreach ($classStudentId in $classEventStudentIds) {
       if ($classStudentId -isnot [string] -or -not $classBalances.ContainsKey($classStudentId) -or $classUnique.ContainsKey($classStudentId)) { throw "Invalid event student" }
       $classUnique[$classStudentId] = $true
     }
     $classApplied = $classEvent
+    $classAppliedStudentIds = $classEventStudentIds
     $classDirection = 1
-    if ($classEvent.type -eq "undo") {
+    if ($classEventType -eq "undo") {
       if ($classStack.Count -eq 0) { throw "Invalid undo" }
       $classApplied = $classStack[$classStack.Count - 1]
       $classStack.RemoveAt($classStack.Count - 1)
-      if ($classApplied.id -ne $classEvent.targetId -or (ConvertTo-Json -InputObject @($classApplied.studentIds) -Compress) -ne (ConvertTo-Json -InputObject @($classEvent.studentIds) -Compress)) { throw "Invalid undo target" }
+      $classAppliedStudentIds = Get-JsonArray (Get-JsonValue $classApplied "studentIds")
+      $classAppliedIdsText = ($classAppliedStudentIds | ForEach-Object { [string]$_ }) -join "|"
+      $classEventIdsText = ($classEventStudentIds | ForEach-Object { [string]$_ }) -join "|"
+      if ((Get-JsonValue $classApplied "id") -ne (Get-JsonValue $classEvent "targetId") -or $classAppliedIdsText -ne $classEventIdsText) { throw "Invalid undo target" }
       $classDirection = -1
     } else {
-      if (-not $classFields.ContainsKey([string]$classEvent.type) -or -not (Test-ClassroomInteger $classEvent.amount 1000) -or $classEvent.amount -lt 1) { throw "Invalid action" }
-      if ($classEvent.type -eq "redeem") {
-        if (-not (Test-ClassroomInteger $classEvent.stickers 1000) -or $classEvent.stickers -lt 1 -or $classEvent.amount % $classEvent.stickers -ne 0 -or $classEvent.amount / $classEvent.stickers -gt 100) { throw "Invalid redemption" }
+      $classAmount = Get-JsonValue $classEvent "amount"
+      if (-not $classFields.ContainsKey($classEventType) -or -not (Test-ClassroomInteger $classAmount 1000) -or $classAmount -lt 1) { throw "Invalid action" }
+      if ($classEventType -eq "redeem") {
+        $classStickers = Get-JsonValue $classEvent "stickers"
+        if (-not (Test-ClassroomInteger $classStickers 1000) -or $classStickers -lt 1 -or $classAmount % $classStickers -ne 0 -or $classAmount / $classStickers -gt 100) { throw "Invalid redemption" }
       }
       $classStack.Add($classEvent)
     }
-    foreach ($classStudentId in $classApplied.studentIds) {
+    $classAppliedType = [string](Get-JsonValue $classApplied "type")
+    $classAppliedAmount = Get-JsonValue $classApplied "amount"
+    foreach ($classStudentId in $classAppliedStudentIds) {
       $classBalance = $classBalances[$classStudentId]
-      $classBalance[$classFields[$classApplied.type]] += $classApplied.amount * $classDirection
-      if ($classApplied.type -eq "redeem") { $classBalance.stickers += $classApplied.stickers * $classDirection }
+      $classBalance[$classFields[$classAppliedType]] += $classAppliedAmount * $classDirection
+      if ($classAppliedType -eq "redeem") { $classBalance.stickers += (Get-JsonValue $classApplied "stickers") * $classDirection }
       foreach ($classNumber in $classBalance.Values) { if (-not (Test-ClassroomInteger $classNumber 1000000)) { throw "Invalid balance" } }
       if ([math]::Floor($classBalance.positive / 5) -lt $classBalance.spent + $classBalance.clearedSmiles -or [math]::Floor($classBalance.negative / 5) -lt $classBalance.clearedFrowns) { throw "Insufficient balance" }
     }
@@ -197,31 +318,33 @@ function Assert-Classroom($value) {
 function Get-ClassroomData {
   $classFile = Join-Path $dataDir "classroom.json"
   if (-not (Test-Path -LiteralPath $classFile)) { return $null }
-  $classData = Get-Content -LiteralPath $classFile -Raw -Encoding UTF8 | ConvertFrom-Json
+  $classData = ConvertFrom-JsonSafe (Get-Content -LiteralPath $classFile -Raw -Encoding UTF8)
   Assert-Classroom $classData
   return $classData
 }
 
 function Save-ClassroomData($payload) {
-  Assert-Classroom $payload.data
+  $classData = Get-JsonValue $payload "data"
+  Assert-Classroom $classData
   $classCurrent = Get-ClassroomData
   $classRevision = 0
-  if ($null -ne $classCurrent) { $classRevision = $classCurrent.revision }
-  if (-not (Test-ClassroomInteger $payload.baseRevision 1000000) -or $payload.baseRevision -ne $classRevision) { throw "CLASSROOM_CONFLICT" }
-  $payload.data.revision = $classRevision + 1
-  Assert-Classroom $payload.data
+  if ($null -ne $classCurrent) { $classRevision = Get-JsonValue $classCurrent "revision" }
+  $classBase = Get-JsonValue $payload "baseRevision"
+  if (-not (Test-ClassroomInteger $classBase 1000000) -or $classBase -ne $classRevision) { throw "CLASSROOM_CONFLICT" }
+  Set-JsonValue $classData "revision" ($classRevision + 1)
+  Assert-Classroom $classData
   if (-not (Test-Path -LiteralPath $dataDir)) { New-Item -ItemType Directory -Path $dataDir | Out-Null }
   $classFile = Join-Path $dataDir "classroom.json"
   $classTemporary = Join-Path $dataDir "classroom.json.tmp"
-  $classJson = ConvertTo-Json -InputObject $payload.data -Depth 32 -Compress
+  $classJson = ConvertTo-JsonSafe $classData
   [IO.File]::WriteAllText($classTemporary, $classJson, [Text.UTF8Encoding]::new($false))
   if ([IO.File]::Exists($classFile)) { [IO.File]::Replace($classTemporary, $classFile, $null) }
   else { [IO.File]::Move($classTemporary, $classFile) }
-  return $payload.data
+  return $classData
 }
 
 function Write-ClassroomJson($res, $payload, [int]$status = 200) {
-  $classBytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $payload -Depth 32 -Compress))
+  $classBytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-JsonSafe $payload))
   $res.StatusCode = $status
   $res.ContentType = "application/json; charset=utf-8"
   $res.Headers.Add("Cache-Control", "no-store")
@@ -230,25 +353,31 @@ function Write-ClassroomJson($res, $payload, [int]$status = 200) {
 }
 
 function Read-JsonBody($req) {
-  $len = [int]$req.ContentLength64
+  $len = [int64]$req.ContentLength64
+  $ms = New-Object IO.MemoryStream
   if ($len -gt 12000000) { throw "Request too large" }
-  if ($len -le 0) { return $null }
-  $buffer = New-Object byte[] $len
-  $read = 0
-  while ($read -lt $len) {
-    $n = $req.InputStream.Read($buffer, $read, $len - $read)
-    if ($n -le 0) { break }
-    $read += $n
+  if ($len -gt 0) {
+    $buffer = New-Object byte[] 8192
+    $remaining = $len
+    while ($remaining -gt 0) {
+      $n = $req.InputStream.Read($buffer, 0, [math]::Min($buffer.Length, $remaining))
+      if ($n -le 0) { break }
+      $ms.Write($buffer, 0, $n)
+      $remaining -= $n
+    }
+  } else {
+    $req.InputStream.CopyTo($ms)
+    if ($ms.Length -gt 12000000) { throw "Request too large" }
   }
-  $text = [Text.Encoding]::UTF8.GetString($buffer, 0, $read)
+  if ($ms.Length -le 0) { return $null }
+  $text = [Text.Encoding]::UTF8.GetString($ms.ToArray())
   if ([string]::IsNullOrWhiteSpace($text)) { return $null }
-  return $text | ConvertFrom-Json
+  return ConvertFrom-JsonSafe $text
 }
 
 function Write-HistoryJson($res, $records, [int]$status = 200) {
-  $payload = @{ records = @($records) }
-  $json = $payload | ConvertTo-Json -Depth 8
-  $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+  $payload = @{ records = (Get-JsonArray $records) }
+  $bytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-JsonSafe $payload))
   $res.StatusCode = $status
   $res.ContentType = "application/json; charset=utf-8"
   $res.Headers.Add("Cache-Control", "no-cache")
@@ -281,6 +410,73 @@ function Open-LocalUrl([string]$target) {
     }
   }
   return $false
+}
+
+if ($args -contains "-SelfTest") {
+  $ErrorActionPreference = "Stop"
+  $temp = Join-Path ([IO.Path]::GetTempPath()) ("quiet-forest-selftest-" + [guid]::NewGuid().ToString("n"))
+  New-Item -ItemType Directory -Path $temp | Out-Null
+  $root = $temp
+  $dataDir = Join-Path $root "data"
+  try {
+    $data = @{
+      version = 1
+      revision = 0
+      className = "测试班"
+      smilesPerSticker = 1
+      students = @(@{
+        id = "s1"
+        name = "张三"
+        archived = $false
+        avatar = "preset:0"
+      })
+      events = @(@{
+        id = "e1"
+        type = "award"
+        studentIds = @("s1")
+        amount = 1
+        reason = ""
+        at = "2026-09-09T00:00:00.000Z"
+      })
+    }
+    $saved = Save-ClassroomData @{ data = $data; baseRevision = 0 }
+    if ((Get-JsonValue $saved "revision") -ne 1) { throw "revision was not incremented" }
+    $text = [IO.File]::ReadAllText((Join-Path $dataDir "classroom.json"))
+    if ($text -notmatch '"students"\s*:\s*\[') { throw "students is not a JSON array: $text" }
+    if ($text -notmatch '"events"\s*:\s*\[') { throw "events is not a JSON array: $text" }
+    if ($text -notmatch '"studentIds"\s*:\s*\[') { throw "studentIds is not a JSON array: $text" }
+    $loaded = Get-ClassroomData
+    if ((Get-JsonArray (Get-JsonValue $loaded "students")).Count -ne 1) { throw "loaded students count" }
+    if ((Get-JsonArray (Get-JsonValue $loaded "events")).Count -ne 1) { throw "loaded events count" }
+    $conflict = $false
+    try {
+      Save-ClassroomData @{ data = $data; baseRevision = 0 }
+    } catch {
+      if ($_.Exception.Message -eq "CLASSROOM_CONFLICT") { $conflict = $true }
+      else { throw }
+    }
+    if (-not $conflict) { throw "stale write accepted" }
+    $unwrapped = ConvertFrom-JsonSafe '{"version":1,"revision":1,"className":"测试班","smilesPerSticker":1,"students":{"id":"s1","name":"张三","archived":false,"avatar":"preset:0"},"events":{"id":"e1","type":"award","studentIds":"s1","amount":1,"reason":"","at":"2026-09-09T00:00:00.000Z"}}'
+    Assert-Classroom $unwrapped
+    $history = Save-HistoryRecords @(@{
+      endedAt = "2026-09-09T00:00:00.000Z"
+      quietMs = 1000
+      planted = 1
+      lost = 0
+      big = 0
+      demo = $false
+    })
+    if ($history.Count -ne 1) { throw "history count" }
+    $dayText = [IO.File]::ReadAllText((Join-Path $dataDir "2026-09-09.json"))
+    if ($dayText -notmatch '"sessions"\s*:\s*\[') { throw "sessions is not a JSON array: $dayText" }
+    Write-Output "selftest ok"
+    exit 0
+  } catch {
+    [Console]::Error.WriteLine($_)
+    exit 1
+  } finally {
+    Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+  }
 }
 
 $started = $false
@@ -358,7 +554,7 @@ while ($listener.IsListening) {
           Write-HistoryJson $res (Get-HistoryRecords)
         } elseif ($req.HttpMethod -eq "POST") {
           $entry = Read-JsonBody $req
-          Write-HistoryJson $res (Save-HistoryRecords (Merge-History @(ConvertTo-HistoryRecord $entry) (Get-HistoryRecords)))
+          Write-HistoryJson $res (Save-HistoryRecords (Merge-History (ConvertTo-HistoryRecord $entry) (Get-HistoryRecords)))
         } elseif ($req.HttpMethod -eq "PUT") {
           $payload = Read-JsonBody $req
           Write-HistoryJson $res (Save-HistoryRecords (Get-ImportedRecords $payload))

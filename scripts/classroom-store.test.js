@@ -71,3 +71,26 @@ print(json.dumps(saved))
     assert.deepEqual(JSON.parse(result.stdout), { ...data, revision: 1 });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+function powershellExe() {
+  for (const shell of process.platform === "win32" ? ["powershell"] : ["pwsh"]) {
+    const probe = spawnSync(shell, ["-NoProfile", "-Command", "exit 0"], { encoding: "utf8" });
+    if (!probe.error && probe.status === 0) return shell;
+  }
+  return null;
+}
+
+test("PowerShell launcher preserves single-item classroom and history arrays", (t) => {
+  const shell = powershellExe();
+  if (!shell) {
+    t.skip("PowerShell is not available");
+    return;
+  }
+  const result = spawnSync(
+    shell,
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", resolve("launchers/launch.ps1"), "-SelfTest"],
+    { encoding: "utf8", timeout: 30000 },
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /selftest ok/);
+});
