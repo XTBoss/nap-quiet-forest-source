@@ -51,7 +51,7 @@
 
 ## 直接使用
 
-可以从 GitHub 的 [Releases](https://github.com/XTBoss/nap-quiet-forest-source/releases) 页面下载自动打包好的 `安静小森林.zip`。每次推送到 `main` 会更新「最新打包」；打 `v*` 标签（例如 `v1.0.0`）会发布对应版本。也可以在仓库的 Actions 页面下载同一次构建的压缩包。
+可以从 GitHub 的 [Releases](https://github.com/XTBoss/nap-quiet-forest-source/releases) 页面下载自动打包好的 `quiet-forest.zip`。解压后得到「安静小森林」文件夹。每次推送到 `main` 会更新「最新打包」；打 `v*` 标签（例如 `v1.0.0`）会发布对应版本。也可以在仓库的 Actions 页面下载同一次构建的压缩包。
 
 1. 下载并解压 `安静小森林.zip`，不要直接在压缩包中打开文件。
 2. Mac 双击 `启动.command`；如果系统阻止运行，请右键选择「打开」。
