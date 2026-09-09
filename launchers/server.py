@@ -3,12 +3,96 @@ import json
 import os
 import re
 import sys
+import threading
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 MAX_HISTORY = 365
 DATE_FILE = re.compile(r"^\d{4}-\d{2}-\d{2}\.json$")
+CLASSROOM_LOCK = threading.Lock()
+
+
+def validate_classroom(value):
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise ValueError("invalid classroom")
+    if type(value.get("revision")) is not int or not 0 <= value["revision"] <= 1_000_000:
+        raise ValueError("invalid revision")
+    if not isinstance(value.get("className"), str) or not value["className"].strip() or len(value["className"]) > 32:
+        raise ValueError("invalid class name")
+    if type(value.get("smilesPerSticker")) is not int or not 1 <= value["smilesPerSticker"] <= 100:
+        raise ValueError("invalid exchange ratio")
+    if not isinstance(value.get("students"), list) or len(value["students"]) > 120:
+        raise ValueError("invalid students")
+    if not isinstance(value.get("events"), list) or len(value["events"]) > 50000:
+        raise ValueError("invalid events")
+    student_ids = set()
+    for student in value["students"]:
+        if not isinstance(student, dict) or not isinstance(student.get("id"), str) or not student["id"] or student["id"] in student_ids:
+            raise ValueError("invalid student id")
+        if not isinstance(student.get("name"), str) or not student["name"].strip() or len(student["name"]) > 24:
+            raise ValueError("invalid student name")
+        if type(student.get("archived")) is not bool or not isinstance(student.get("avatar"), str):
+            raise ValueError("invalid student")
+        avatar = student["avatar"]
+        if not re.fullmatch(r"preset:(?:[0-9]|[1-5][0-9])", avatar) and not (len(avatar) <= 24000 and re.fullmatch(r"data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+", avatar)):
+            raise ValueError("invalid avatar")
+        student_ids.add(student["id"])
+    balances = {identifier: dict(positive=0, negative=0, spent=0, clearedSmiles=0, clearedFrowns=0, stickers=0) for identifier in student_ids}
+    stack, event_ids = [], set()
+    fields = {"award": "positive", "deduct": "negative", "redeem": "spent", "clear-smile": "clearedSmiles", "clear-frown": "clearedFrowns"}
+    for event in value["events"]:
+        if not isinstance(event, dict) or not isinstance(event.get("id"), str) or not event["id"] or event["id"] in event_ids:
+            raise ValueError("invalid event id")
+        event_ids.add(event["id"])
+        if not isinstance(event.get("studentIds"), list) or not event["studentIds"] or len(set(event["studentIds"])) != len(event["studentIds"]) or not all(identifier in student_ids for identifier in event["studentIds"]):
+            raise ValueError("invalid event students")
+        if not isinstance(event.get("reason"), str) or len(event["reason"]) > 120:
+            raise ValueError("invalid reason")
+        datetime.fromisoformat(event["at"].replace("Z", "+00:00"))
+        direction = 1
+        if event.get("type") == "undo":
+            target = stack.pop() if stack else None
+            if not target or target["id"] != event.get("targetId") or target["studentIds"] != event["studentIds"]:
+                raise ValueError("invalid undo")
+            event, direction = target, -1
+        else:
+            if event.get("type") not in fields or type(event.get("amount")) is not int or not 1 <= event["amount"] <= 1000:
+                raise ValueError("invalid action")
+            if event["type"] == "redeem":
+                stickers = event.get("stickers")
+                if type(stickers) is not int or not 1 <= stickers <= 1000 or event["amount"] % stickers or not 1 <= event["amount"] / stickers <= 100:
+                    raise ValueError("invalid redemption")
+            stack.append(event)
+        for identifier in event["studentIds"]:
+            balance = balances[identifier]
+            balance[fields[event["type"]]] += event["amount"] * direction
+            if event["type"] == "redeem":
+                balance["stickers"] += event["stickers"] * direction
+            if not all(0 <= number <= 1_000_000 for number in balance.values()) or balance["positive"] // 5 < balance["spent"] + balance["clearedSmiles"] or balance["negative"] // 5 < balance["clearedFrowns"]:
+                raise ValueError("insufficient balance")
+    return value
+
+
+def load_classroom(root):
+    path = Path(root) / "data" / "classroom.json"
+    return validate_classroom(json.loads(path.read_text(encoding="utf-8"))) if path.exists() else None
+
+
+def save_classroom(root, payload):
+    value = validate_classroom(payload["data"])
+    with CLASSROOM_LOCK:
+        current = load_classroom(root)
+        revision = current["revision"] if current else 0
+        if type(payload.get("baseRevision")) is not int or payload["baseRevision"] != revision:
+            raise FileExistsError("classroom changed in another window")
+        value = {**value, "revision": revision + 1}
+        validate_classroom(value)
+        path = data_dir(root) / "classroom.json"
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(value, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+        return value
 
 
 def data_dir(root):
@@ -144,6 +228,12 @@ class Handler(SimpleHTTPRequestHandler):
         return self.server.quiet_root
 
     def do_GET(self):
+        if self._api_path() == "/api/classroom":
+            try:
+                self._send_json(200, {"data": load_classroom(self.root)})
+            except Exception:
+                self._send_json(500, {"error": "classroom could not be read"})
+            return
         if self._api_path() == "/api/history":
             self._send_json(200, {"records": load_all(self.root)})
             return
@@ -167,6 +257,17 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "bad request"})
 
     def _handle_write(self, method):
+        if self._api_path() == "/api/classroom":
+            if method != "PUT":
+                self._send_json(405, {"error": "method not allowed"})
+                return True
+            try:
+                self._send_json(200, {"data": save_classroom(self.root, self._read_json())})
+            except FileExistsError as error:
+                self._send_json(409, {"error": str(error)})
+            except Exception:
+                self._send_json(400, {"error": "invalid classroom data"})
+            return True
         if self._api_path() != "/api/history":
             return False
         try:
@@ -185,7 +286,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _read_json(self):
         length = int(self.headers.get("Content-Length") or 0)
-        if length > 1_000_000:
+        if length > (12_000_000 if self._api_path() == "/api/classroom" else 1_000_000):
             raise ValueError("too large")
         raw = self.rfile.read(length) if length else b"{}"
         return json.loads(raw.decode("utf-8") or "{}")

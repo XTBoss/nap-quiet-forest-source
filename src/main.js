@@ -1,4 +1,5 @@
 import "./style.css";
+import { initClassroom } from "./classroom-ui.js";
 import {
   DEFAULT_COMBINE,
   canCombine,
@@ -719,3 +720,20 @@ renderHistory();
 void refreshHistory().then(renderHistory);
 els.progressRing.style.strokeDasharray = String(RING_LENGTH);
 els.progressRing.style.strokeDashoffset = String(RING_LENGTH);
+
+initClassroom();
+function switchModule() {
+  const module = location.hash === "#classroom" ? "classroom" : "forest";
+  if (module === "classroom" && state.running) stopListening();
+  document.body.dataset.module = module;
+  document.getElementById("forestModule").hidden = module !== "forest";
+  document.getElementById("classroomModule").hidden = module !== "classroom";
+  document.querySelectorAll("[data-module-link]").forEach((link) => {
+    if (link.dataset.moduleLink === module) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
+  document.title = module === "classroom" ? "班级笑脸墙" : "安静小森林";
+  window.dispatchEvent(new Event("classroom-layout"));
+}
+window.addEventListener("hashchange", switchModule);
+switchModule();

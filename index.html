@@ -14,6 +14,11 @@
     />
   </head>
   <body>
+    <nav class="module-nav" aria-label="应用模块">
+      <a href="#forest" class="module-link" data-module-link="forest"><i data-lucide="trees" aria-hidden="true"></i>安静小森林</a>
+      <a href="#classroom" class="module-link" data-module-link="classroom"><i data-lucide="smile" aria-hidden="true"></i>班级笑脸墙</a>
+    </nav>
+    <div id="forestModule">
     <div class="sky" aria-hidden="true">
       <div class="stars" id="stars"></div>
       <div class="hills"></div>
@@ -182,6 +187,30 @@
 
     <div class="toast" id="toast" hidden></div>
     <button type="button" class="noise-btn" id="noiseBtn" hidden>教室开始吵</button>
+    </div>
+
+    <main id="classroomModule" class="classroom" hidden>
+      <header class="class-heading">
+        <div class="class-title"><span class="class-mark"><i data-lucide="smile" aria-hidden="true"></i></span><div><h1 id="className">我的班级</h1><p><span id="studentCount">0 位同学</span><span class="class-separator">·</span><span id="classSaveStatus" role="status">正在读取</span></p></div></div>
+        <div class="class-tools">
+          <button type="button" class="c-button" id="classUndo" data-tip="撤销上一步" aria-label="撤销上一步" disabled><i data-lucide="undo-2" aria-hidden="true"></i></button>
+          <button type="button" class="c-button" id="classFullscreen" data-tip="全屏" aria-label="全屏"><i data-lucide="maximize" aria-hidden="true"></i></button>
+          <label class="class-display"><input type="checkbox" id="classDisplay">展示模式</label>
+          <button type="button" class="c-button" id="classSettings"><i data-lucide="settings-2" aria-hidden="true"></i><span>班级设置</span></button>
+          <button type="button" class="c-button c-primary" id="classRoster"><i data-lucide="users-round" aria-hidden="true"></i><span>学生管理</span></button>
+        </div>
+      </header>
+      <div id="classWarning" class="class-warning" hidden><span id="classWarningText"></span><button type="button" class="c-button" id="classRetry">重新连接</button><button type="button" class="c-button" id="classRescue">导出当前数据</button></div>
+      <div class="class-toolbar" id="classToolbar">
+        <div class="class-selection"><label><input type="checkbox" id="classSelectAll">全选</label><span id="classSelectionCount">未选择</span><button type="button" class="c-button c-plus" id="classBatchPlus" disabled><i data-lucide="plus" aria-hidden="true"></i>加分</button><button type="button" class="c-button c-minus" id="classBatchMinus" disabled><i data-lucide="minus" aria-hidden="true"></i>扣分</button></div>
+        <div class="class-legend"><span><i data-lucide="smile" aria-hidden="true"></i>笑脸</span><span><i data-lucide="frown" aria-hidden="true"></i>苦脸</span><span>5 分 / 个</span></div>
+      </div>
+      <div class="class-empty" id="classEmpty" hidden><span class="class-empty-mark"><i data-lucide="users-round" aria-hidden="true"></i></span><h2>班级名单还是空的</h2><button type="button" class="c-button c-primary" id="classAddFirst"><i data-lucide="plus" aria-hidden="true"></i>添加学生</button></div>
+      <section id="studentGrid" class="student-grid" aria-label="全班学生"></section>
+      <footer class="class-footer"><span id="classLatest">暂无积分记录</span><button type="button" class="c-text-button" id="classHistory"><i data-lucide="history" aria-hidden="true"></i>操作记录</button></footer>
+    </main>
+    <dialog id="classDialog" class="class-dialog" aria-labelledby="classDialogTitle"><div class="class-dialog-head"><h2 id="classDialogTitle"></h2><button type="button" class="c-button" id="classDialogClose" aria-label="关闭" data-tip="关闭"><i data-lucide="x" aria-hidden="true"></i></button></div><div id="classDialogBody"></div></dialog>
+    <div id="classToast" class="class-toast" role="status" hidden></div>
 
     <script type="module" src="/src/main.js"></script>
   </body>

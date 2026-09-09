@@ -138,8 +138,100 @@ function Save-HistoryRecords($records) {
   return Get-HistoryRecords
 }
 
+function Test-ClassroomInteger($value, [long]$maximum) {
+  if ($null -eq $value -or $value -is [bool] -or $value -is [string]) { return $false }
+  try { return [double]$value -ge 0 -and [double]$value -le $maximum -and [math]::Floor([double]$value) -eq [double]$value } catch { return $false }
+}
+
+function Assert-Classroom($value) {
+  if ($null -eq $value -or $value.version -ne 1 -or -not (Test-ClassroomInteger $value.revision 1000000)) { throw "Invalid classroom version" }
+  if ($value.className -isnot [string] -or [string]::IsNullOrWhiteSpace($value.className) -or $value.className.Length -gt 32) { throw "Invalid class name" }
+  if (-not (Test-ClassroomInteger $value.smilesPerSticker 100) -or $value.smilesPerSticker -lt 1) { throw "Invalid ratio" }
+  if ($value.students -isnot [array] -or $value.students.Count -gt 120 -or $value.events -isnot [array] -or $value.events.Count -gt 50000) { throw "Invalid classroom lists" }
+  $classBalances = @{}
+  foreach ($classStudent in $value.students) {
+    if ($classStudent.id -isnot [string] -or -not $classStudent.id -or $classStudent.id.Length -gt 80 -or $classBalances.ContainsKey($classStudent.id)) { throw "Invalid student id" }
+    if ($classStudent.name -isnot [string] -or [string]::IsNullOrWhiteSpace($classStudent.name) -or $classStudent.name.Length -gt 24 -or $classStudent.archived -isnot [bool]) { throw "Invalid student" }
+    if ($classStudent.avatar -isnot [string] -or ($classStudent.avatar -notmatch '^preset:([0-9]|[1-5][0-9])$' -and ($classStudent.avatar.Length -gt 24000 -or $classStudent.avatar -notmatch '^data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$'))) { throw "Invalid avatar" }
+    $classBalances[$classStudent.id] = @{ positive = 0; negative = 0; spent = 0; clearedSmiles = 0; clearedFrowns = 0; stickers = 0 }
+  }
+  $classFields = @{ award = "positive"; deduct = "negative"; redeem = "spent"; "clear-smile" = "clearedSmiles"; "clear-frown" = "clearedFrowns" }
+  $classStack = New-Object 'System.Collections.Generic.List[object]'
+  $classEventIds = @{}
+  foreach ($classEvent in $value.events) {
+    if ($classEvent.id -isnot [string] -or -not $classEvent.id -or $classEventIds.ContainsKey($classEvent.id)) { throw "Invalid event id" }
+    $classEventIds[$classEvent.id] = $true
+    if ($classEvent.reason -isnot [string] -or $classEvent.reason.Length -gt 120) { throw "Invalid reason" }
+    [void][datetime]::Parse($classEvent.at)
+    if ($classEvent.studentIds -isnot [array] -or $classEvent.studentIds.Count -eq 0) { throw "Invalid event students" }
+    $classUnique = @{}
+    foreach ($classStudentId in $classEvent.studentIds) {
+      if ($classStudentId -isnot [string] -or -not $classBalances.ContainsKey($classStudentId) -or $classUnique.ContainsKey($classStudentId)) { throw "Invalid event student" }
+      $classUnique[$classStudentId] = $true
+    }
+    $classApplied = $classEvent
+    $classDirection = 1
+    if ($classEvent.type -eq "undo") {
+      if ($classStack.Count -eq 0) { throw "Invalid undo" }
+      $classApplied = $classStack[$classStack.Count - 1]
+      $classStack.RemoveAt($classStack.Count - 1)
+      if ($classApplied.id -ne $classEvent.targetId -or (ConvertTo-Json -InputObject @($classApplied.studentIds) -Compress) -ne (ConvertTo-Json -InputObject @($classEvent.studentIds) -Compress)) { throw "Invalid undo target" }
+      $classDirection = -1
+    } else {
+      if (-not $classFields.ContainsKey([string]$classEvent.type) -or -not (Test-ClassroomInteger $classEvent.amount 1000) -or $classEvent.amount -lt 1) { throw "Invalid action" }
+      if ($classEvent.type -eq "redeem") {
+        if (-not (Test-ClassroomInteger $classEvent.stickers 1000) -or $classEvent.stickers -lt 1 -or $classEvent.amount % $classEvent.stickers -ne 0 -or $classEvent.amount / $classEvent.stickers -gt 100) { throw "Invalid redemption" }
+      }
+      $classStack.Add($classEvent)
+    }
+    foreach ($classStudentId in $classApplied.studentIds) {
+      $classBalance = $classBalances[$classStudentId]
+      $classBalance[$classFields[$classApplied.type]] += $classApplied.amount * $classDirection
+      if ($classApplied.type -eq "redeem") { $classBalance.stickers += $classApplied.stickers * $classDirection }
+      foreach ($classNumber in $classBalance.Values) { if (-not (Test-ClassroomInteger $classNumber 1000000)) { throw "Invalid balance" } }
+      if ([math]::Floor($classBalance.positive / 5) -lt $classBalance.spent + $classBalance.clearedSmiles -or [math]::Floor($classBalance.negative / 5) -lt $classBalance.clearedFrowns) { throw "Insufficient balance" }
+    }
+  }
+}
+
+function Get-ClassroomData {
+  $classFile = Join-Path $dataDir "classroom.json"
+  if (-not (Test-Path -LiteralPath $classFile)) { return $null }
+  $classData = Get-Content -LiteralPath $classFile -Raw -Encoding UTF8 | ConvertFrom-Json
+  Assert-Classroom $classData
+  return $classData
+}
+
+function Save-ClassroomData($payload) {
+  Assert-Classroom $payload.data
+  $classCurrent = Get-ClassroomData
+  $classRevision = 0
+  if ($null -ne $classCurrent) { $classRevision = $classCurrent.revision }
+  if (-not (Test-ClassroomInteger $payload.baseRevision 1000000) -or $payload.baseRevision -ne $classRevision) { throw "CLASSROOM_CONFLICT" }
+  $payload.data.revision = $classRevision + 1
+  Assert-Classroom $payload.data
+  if (-not (Test-Path -LiteralPath $dataDir)) { New-Item -ItemType Directory -Path $dataDir | Out-Null }
+  $classFile = Join-Path $dataDir "classroom.json"
+  $classTemporary = Join-Path $dataDir "classroom.json.tmp"
+  $classJson = ConvertTo-Json -InputObject $payload.data -Depth 32 -Compress
+  [IO.File]::WriteAllText($classTemporary, $classJson, [Text.UTF8Encoding]::new($false))
+  if ([IO.File]::Exists($classFile)) { [IO.File]::Replace($classTemporary, $classFile, $null) }
+  else { [IO.File]::Move($classTemporary, $classFile) }
+  return $payload.data
+}
+
+function Write-ClassroomJson($res, $payload, [int]$status = 200) {
+  $classBytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $payload -Depth 32 -Compress))
+  $res.StatusCode = $status
+  $res.ContentType = "application/json; charset=utf-8"
+  $res.Headers.Add("Cache-Control", "no-store")
+  $res.ContentLength64 = $classBytes.Length
+  $res.OutputStream.Write($classBytes, 0, $classBytes.Length)
+}
+
 function Read-JsonBody($req) {
   $len = [int]$req.ContentLength64
+  if ($len -gt 12000000) { throw "Request too large" }
   if ($len -le 0) { return $null }
   $buffer = New-Object byte[] $len
   $read = 0
@@ -246,7 +338,21 @@ while ($listener.IsListening) {
   $res = $ctx.Response
   try {
     $localPath = [Uri]::UnescapeDataString($req.Url.LocalPath)
-    if ($localPath -eq "/api/history") {
+    if ($localPath -eq "/api/classroom") {
+      try {
+        if ($req.HttpMethod -eq "GET") {
+          Write-ClassroomJson $res @{ data = (Get-ClassroomData) }
+        } elseif ($req.HttpMethod -eq "PUT") {
+          $classPayload = Read-JsonBody $req
+          Write-ClassroomJson $res @{ data = (Save-ClassroomData $classPayload) }
+        } else { Write-ClassroomJson $res @{ error = "method not allowed" } 405 }
+      } catch {
+        $classStatus = 400
+        if ($req.HttpMethod -eq "GET") { $classStatus = 500 }
+        if ($_.Exception.Message -eq "CLASSROOM_CONFLICT") { $classStatus = 409 }
+        Write-ClassroomJson $res @{ error = $_.Exception.Message } $classStatus
+      }
+    } elseif ($localPath -eq "/api/history") {
       try {
         if ($req.HttpMethod -eq "GET") {
           Write-HistoryJson $res (Get-HistoryRecords)
