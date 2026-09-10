@@ -80,7 +80,7 @@ function powershellExe() {
   return null;
 }
 
-test("PowerShell launcher preserves single-item classroom and history arrays", (t) => {
+test("PowerShell launcher preserves arrays, repeated awards and undo across file replacements", (t) => {
   const shell = powershellExe();
   if (!shell) {
     t.skip("PowerShell is not available");
