@@ -376,7 +376,8 @@ function Save-ClassroomData($payload) {
   $classTemporary = Join-Path $dataDir "classroom.json.tmp"
   $classJson = ConvertTo-JsonSafe $classData
   [IO.File]::WriteAllText($classTemporary, $classJson, [Text.UTF8Encoding]::new($false))
-  if ([IO.File]::Exists($classFile)) { [IO.File]::Replace($classTemporary, $classFile, $null) }
+  # PowerShell converts $null to an empty string for .NET string parameters.
+  if ([IO.File]::Exists($classFile)) { [IO.File]::Replace($classTemporary, $classFile, [System.Management.Automation.Language.NullString]::Value) }
   else { [IO.File]::Move($classTemporary, $classFile) }
   return $classData
 }
@@ -480,7 +481,8 @@ if ($args -contains "-SelfTest") {
         at = "2026-09-09T00:00:00.000Z"
       })
     }
-    $saved = Save-ClassroomData @{ data = $data; baseRevision = 0 }
+    $payload = ConvertFrom-JsonSafe (ConvertTo-JsonSafe @{ data = $data; baseRevision = 0 })
+    $saved = Save-ClassroomData $payload
     if ((Get-JsonValue $saved "revision") -ne 1) { throw "revision was not incremented" }
     $text = [IO.File]::ReadAllText((Join-Path $dataDir "classroom.json"))
     if ($text -notmatch '"students"\s*:\s*\[') { throw "students is not a JSON array: $text" }
@@ -489,6 +491,46 @@ if ($args -contains "-SelfTest") {
     $loaded = Get-ClassroomData
     if ((Get-JsonArray (Get-JsonValue $loaded "students")).Count -ne 1) { throw "loaded students count" }
     if ((Get-JsonArray (Get-JsonValue $loaded "events")).Count -ne 1) { throw "loaded events count" }
+    # Exercise replacement of an existing file through the same JSON round trips as HTTP requests.
+    for ($i = 2; $i -le 6; $i++) {
+      $events = Get-JsonArray (Get-JsonValue $loaded "events")
+      $events.Add(@{
+        id = "e$i"
+        type = "award"
+        studentIds = @("s1")
+        amount = 1
+        reason = ""
+        at = "2026-09-09T00:00:00.000Z"
+      })
+      Set-JsonValue $loaded "events" $events
+      $payload = ConvertFrom-JsonSafe (ConvertTo-JsonSafe @{ data = $loaded; baseRevision = ($i - 1) })
+      $saved = Save-ClassroomData $payload
+      $responseText = ConvertTo-JsonSafe @{ data = $saved }
+      if ($responseText -notmatch '"students"\s*:\s*\[' -or $responseText -notmatch '"studentIds"\s*:\s*\[') { throw "response arrays lost after award $i" }
+      $response = ConvertFrom-JsonSafe $responseText
+      if ((Get-JsonValue (Get-JsonValue $response "data") "revision") -ne $i) { throw "response revision after award $i" }
+      $loaded = Get-ClassroomData
+      if ((Get-JsonValue $loaded "revision") -ne $i) { throw "loaded revision after award $i" }
+      if ((Get-JsonArray (Get-JsonValue $loaded "events")).Count -ne $i) { throw "lost award $i after reload" }
+      if (Test-Path -LiteralPath (Join-Path $dataDir "classroom.json.tmp")) { throw "temporary file left after award $i" }
+    }
+    $events = Get-JsonArray (Get-JsonValue $loaded "events")
+    $events.Add(@{
+      id = "undo-e6"
+      type = "undo"
+      targetId = "e6"
+      studentIds = @("s1")
+      reason = "undo"
+      at = "2026-09-09T00:00:00.000Z"
+    })
+    Set-JsonValue $loaded "events" $events
+    $payload = ConvertFrom-JsonSafe (ConvertTo-JsonSafe @{ data = $loaded; baseRevision = 6 })
+    $saved = Save-ClassroomData $payload
+    $loaded = Get-ClassroomData
+    if ((Get-JsonValue $loaded "revision") -ne 7) { throw "undo revision" }
+    $loadedEvents = Get-JsonArray (Get-JsonValue $loaded "events")
+    if ($loadedEvents.Count -ne 7 -or (Get-JsonValue $loadedEvents[6] "targetId") -ne "e6") { throw "undo lost after reload" }
+    $textBeforeConflict = [IO.File]::ReadAllText((Join-Path $dataDir "classroom.json"))
     $conflict = $false
     try {
       Save-ClassroomData @{ data = $data; baseRevision = 0 }
@@ -497,6 +539,7 @@ if ($args -contains "-SelfTest") {
       else { throw }
     }
     if (-not $conflict) { throw "stale write accepted" }
+    if ([IO.File]::ReadAllText((Join-Path $dataDir "classroom.json")) -cne $textBeforeConflict) { throw "stale write changed saved data" }
     $unwrapped = ConvertFrom-JsonSafe '{"version":1,"revision":1,"className":"测试班","smilesPerSticker":1,"students":{"id":"s1","name":"张三","archived":false,"avatar":"preset:0"},"events":{"id":"e1","type":"award","studentIds":"s1","amount":1,"reason":"","at":"2026-09-09T00:00:00.000Z"}}'
     Assert-Classroom $unwrapped
     $history = Save-HistoryRecords @(@{
